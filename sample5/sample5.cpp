@@ -29,6 +29,7 @@
 #include <string.h>
 #include <optix.h>
 #include <sutil.h>
+#include <optix_world.h>
 
 char path_to_ptx[512];
 
@@ -38,8 +39,16 @@ typedef struct struct_BoxExtent{
     float max[3];
 } BoxExtent;
 
-unsigned int width = 1024;
-unsigned int height = 768;
+struct BasicLight
+{
+ optix::float3 pos;
+ optix::float3 color;
+ int casts_shadow;
+ };
+
+
+unsigned int width = 1920;
+unsigned int height = 1080;
 
 void createContext( RTcontext* context, RTbuffer* buffer );
 void createGeometry( RTcontext context, RTgeometry* sphere );
@@ -121,7 +130,7 @@ void createContext( RTcontext* context, RTbuffer* output_buffer_obj )
   RTprogram  exception_program;
   RTprogram  miss_program;
   RTvariable output_buffer;
-  RTvariable radiance_ray_type;
+  RTvariable radiance_ray_type, shadow_ray_type;
   RTvariable epsilon;
 
   /* variables for ray gen program */
@@ -141,15 +150,20 @@ void createContext( RTcontext* context, RTbuffer* output_buffer_obj )
 
   /* Setup context */
   RT_CHECK_ERROR2( rtContextCreate( context ) );
-  RT_CHECK_ERROR2( rtContextSetRayTypeCount( *context, 1 ) );
+  RT_CHECK_ERROR2( rtContextSetRayTypeCount( *context, 2 ) );
   RT_CHECK_ERROR2( rtContextSetEntryPointCount( *context, 1 ) );
 
   RT_CHECK_ERROR2( rtContextDeclareVariable( *context, "output_buffer" , &output_buffer) );
   RT_CHECK_ERROR2( rtContextDeclareVariable( *context, "radiance_ray_type" , &radiance_ray_type) );
+  RT_CHECK_ERROR2( rtContextDeclareVariable( *context, "shadow_ray_type" , &shadow_ray_type) );
+  
+  
   RT_CHECK_ERROR2( rtContextDeclareVariable( *context, "scene_epsilon" , &epsilon) );
 
   RT_CHECK_ERROR2( rtVariableSet1ui( radiance_ray_type, 0u ) );
-  RT_CHECK_ERROR2( rtVariableSet1f( epsilon, 1.e-4f ) );
+  RT_CHECK_ERROR2( rtVariableSet1ui( shadow_ray_type, 1u ) );
+  
+  RT_CHECK_ERROR2( rtVariableSet1f( epsilon, 1.e-3f ) );
 
   /* Render result buffer */
   RT_CHECK_ERROR2( rtBufferCreate( *context, RT_BUFFER_OUTPUT, output_buffer_obj ) );
@@ -197,6 +211,8 @@ void createContext( RTcontext* context, RTbuffer* output_buffer_obj )
 
 void createGeometry( RTcontext context, RTgeometry* sphere )
 {
+  int num_spheres=2;
+  int num_lightSources = 2;
   RT_CHECK_ERROR( rtGeometryCreate( context, sphere ) );
   RT_CHECK_ERROR( rtGeometrySetPrimitiveCount( *sphere, 1u ) );
 
@@ -208,33 +224,97 @@ void createGeometry( RTcontext context, RTgeometry* sphere )
   RT_CHECK_ERROR( rtProgramCreateFromPTXFile( context, path_to_ptx, "intersect", &intersection_program) );
   RT_CHECK_ERROR( rtGeometrySetIntersectionProgram( *sphere, intersection_program ) );
 
-  RTvariable s;
-  float sphere_loc[4] = { 0, 0, 0, 0.7f };
-  RT_CHECK_ERROR( rtGeometryDeclareVariable( *sphere, "sphere" , &s) );
-  RT_CHECK_ERROR( rtVariableSet4fv( s, &sphere_loc[0] ) );
+  RTvariable spheres,spheres_colors, lights;
+  optix::float4 * coords;
+  optix::float3 * colors;
+  
+  RTbuffer buff_coords,buff_colors;
+  RTbuffer buff_lights;
+  BasicLight * lightsPtr;
+ 
+  RT_CHECK_ERROR(rtBufferCreate(context, RT_BUFFER_INPUT,&buff_lights));
+  RT_CHECK_ERROR(rtBufferSetFormat(buff_lights,RT_FORMAT_USER));
+  RT_CHECK_ERROR(rtBufferSetElementSize(buff_lights,sizeof(BasicLight)));
+  RT_CHECK_ERROR(rtBufferSetSize1D(buff_lights, num_lightSources));
+  RT_CHECK_ERROR(rtContextDeclareVariable( context, "lights", &lights ) );
+  RT_CHECK_ERROR(rtVariableSetObject( lights, buff_lights ) );
+  RT_CHECK_ERROR(rtBufferMap(buff_lights, (void**)&lightsPtr));
+ 
+  RT_CHECK_ERROR(rtBufferCreate(context, RT_BUFFER_INPUT,&buff_coords));
+  RT_CHECK_ERROR(rtBufferSetFormat(buff_coords,RT_FORMAT_FLOAT4));
+  RT_CHECK_ERROR(rtBufferSetSize1D(buff_coords, num_spheres));
+  RT_CHECK_ERROR( rtContextDeclareVariable( context, "spheres", &spheres ) );
+  RT_CHECK_ERROR( rtVariableSetObject( spheres, buff_coords ) );
+  RT_CHECK_ERROR(rtBufferMap(buff_coords, (void**)&coords));
+  
+  RT_CHECK_ERROR(rtBufferCreate(context, RT_BUFFER_INPUT,&buff_colors));
+  RT_CHECK_ERROR(rtBufferSetFormat(buff_colors,RT_FORMAT_FLOAT3));
+  RT_CHECK_ERROR(rtBufferSetSize1D(buff_colors, num_spheres));
+  RT_CHECK_ERROR( rtContextDeclareVariable( context, "spheres_colors", &spheres_colors ) );
+  RT_CHECK_ERROR( rtVariableSetObject( spheres_colors, buff_colors ) );
+  RT_CHECK_ERROR(rtBufferMap(buff_colors, (void**)&colors));
+  int i;
+  for (i =0; i<num_spheres; i++)
+  {
+	coords[i].x=i*0.6;
+	coords[i].y=i*0.6;
+	coords[i].z=0;
+	coords[i].w=0.25f;
+	colors[i].x=i*0.5f;
+	colors[i].y=1-i*0.5f;
+	colors[i].z=0;	
+  }
+  lightsPtr[0].pos.x=-10.0f;
+  lightsPtr[0].pos.y=-10.0f;
+  lightsPtr[0].pos.z=0.0f;
+  
+  
+  lightsPtr[1].pos.x=10.0f;
+  lightsPtr[1].pos.y=-10.0f;
+  lightsPtr[1].pos.z=5.0f;
+  
+  
+  RT_CHECK_ERROR(rtBufferUnmap(buff_coords));
+  RT_CHECK_ERROR(rtBufferUnmap(buff_colors));
+  RT_CHECK_ERROR(rtBufferUnmap(buff_lights));
+  
+  RTvariable Ka,Kd,Ks,phong_exp;
+  RT_CHECK_ERROR(rtContextDeclareVariable( context, "Ka", &Ka ) );
+  RT_CHECK_ERROR(rtContextDeclareVariable( context, "Kd", &Kd ) );
+  RT_CHECK_ERROR(rtContextDeclareVariable( context, "Ks", &Ks ) );
+  //RT_CHECK_ERROR(rtContextDeclareVariable( context, "ambient_color", &ambient_color ) );
+  RT_CHECK_ERROR(rtContextDeclareVariable( context, "phong_exp", &phong_exp ) );
+  RT_CHECK_ERROR(rtVariableSet3f(Ka, 1.0f,1.0f,1.0f));
+  RT_CHECK_ERROR(rtVariableSet3f(Kd, 0.6f,0.6f,0.6f));
+  RT_CHECK_ERROR(rtVariableSet3f(Ks, 0.4f,0.4f,0.4f));
+  RT_CHECK_ERROR(rtVariableSet3f(Ka, 1.0f,1.0f,1.0f));
+  RT_CHECK_ERROR(rtVariableSet1f(phong_exp, 88));
 
-  float sphere_color[3] = { 0.0f, 1.0f, 0.0f };
-  RT_CHECK_ERROR( rtGeometryDeclareVariable( *sphere, "sphere_color" , &s) );
-  RT_CHECK_ERROR( rtVariableSet3fv( s, &sphere_loc[0] ) );
+  
+
 }
 
 
 void createMaterial( RTcontext context, RTmaterial* material )
 {
-  RTprogram chp;
+  RTprogram chp, ahp;
 
   sprintf( path_to_ptx, "%s/%s", sutilSamplesPtxDir(), "normal_shader.ptx" );
   RT_CHECK_ERROR( rtProgramCreateFromPTXFile( context, path_to_ptx, "closest_hit_radiance", &chp ) );
-
+  sprintf( path_to_ptx, "%s/%s", sutilSamplesPtxDir(), "normal_shader.ptx" );
+  RT_CHECK_ERROR( rtProgramCreateFromPTXFile( context, path_to_ptx, "any_hit_shadow", &ahp ) );
+	
+  
   RT_CHECK_ERROR( rtMaterialCreate( context, material ) );
   RT_CHECK_ERROR( rtMaterialSetClosestHitProgram( *material, 0, chp) );
+  RT_CHECK_ERROR( rtMaterialSetAnyHitProgram( *material, 1, ahp) );
 }
 
 
 void createInstance( RTcontext context, RTgeometry sphere, RTmaterial material )
 {
   RTgeometrygroup geometrygroup;
-  RTvariable      top_object;
+  RTvariable      top_object, top_shadower;
   RTacceleration  acceleration;
   RTgeometryinstance instance;
 
@@ -254,7 +334,14 @@ void createInstance( RTcontext context, RTgeometry sphere, RTmaterial material )
   RT_CHECK_ERROR( rtGeometryGroupSetAcceleration( geometrygroup, acceleration ) );
 
   RT_CHECK_ERROR( rtContextDeclareVariable( context, "top_object", &top_object ) );
+  RT_CHECK_ERROR( rtContextDeclareVariable( context, "top_shadower", &top_shadower ) );
+  
   RT_CHECK_ERROR( rtVariableSetObject( top_object, geometrygroup ) );
+  RT_CHECK_ERROR( rtVariableSetObject( top_shadower, geometrygroup ) );
+  
+
+  
+  
 }
 
 
